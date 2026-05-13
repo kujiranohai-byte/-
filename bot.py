@@ -31,190 +31,119 @@ async def init_db():
             created_at TEXT
         )
         """)
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS report_settings (
+            guild_id TEXT PRIMARY KEY,
+            channel_id TEXT
+        )
+        """)
+        
         await db.commit()
 
-# =======================
+
+# =========================
 # ログチャンネル取得
-# =======================
+# =========================
+
 async def get_log_channel(guild_id):
+
     log_guild = bot.get_guild(LOG_GUILD_ID)
+
     if not log_guild:
         return None
 
     category = log_guild.get_channel(LOG_CATEGORY_ID)
+
     if not category:
         return None
 
     name = str(guild_id)
 
     for ch in category.text_channels:
+
         if ch.name == name:
             return ch
 
-    return await log_guild.create_text_channel(name=name, category=category)
+    return await log_guild.create_text_channel(
+        name=name,
+        category=category
+    )
 
-# =======================
+# =========================
 # 通報設定
-# =======================
-@bot.tree.command(name="reportsetup", description="匿名通報送信先設定")
+# =========================
+
+@bot.tree.command(
+    name="reportsetup",
+    description="匿名通報チャンネル設定"
+)
 async def reportsetup(
     interaction: discord.Interaction,
     channel: discord.TextChannel
 ):
 
     if not interaction.user.guild_permissions.administrator:
+
         return await interaction.response.send_message(
             "管理者のみ",
             ephemeral=True
         )
 
-    report_channels[interaction.guild.id] = channel.id
+    async with aiosqlite.connect("bot.db") as db:
+
+        await db.execute("""
+        INSERT OR REPLACE INTO report_settings(
+            guild_id,
+            channel_id
+        )
+        VALUES (?, ?)
+        """, (
+            str(interaction.guild.id),
+            str(channel.id)
+        ))
+
+        await db.commit()
 
     await interaction.response.send_message(
         f"{channel.mention} に設定しました",
         ephemeral=True
     )
 
-
 # =========================
-# 通報
+# 通報返信モーダル
 # =========================
-@bot.tree.command(name="report", description="匿名通報")
-async def report(
-    interaction: discord.Interaction,
-    title: str,
-    detail: str
-):
 
-    await interaction.response.defer(ephemeral=True)
-
-    async with aiosqlite.connect("bot.db") as db:
-
-        cur = await db.execute("""
-        INSERT INTO reports(
-            user_id,
-            guild_id,
-            title,
-            detail,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            str(interaction.user.id),
-            str(interaction.guild.id),
-            title,
-            detail,
-            "未対応",
-            str(datetime.now())
-        ))
-
-        await db.commit()
-
-        report_id = cur.lastrowid
-
-    channel_id = report_channels.get(
-        interaction.guild.id
-    )
-
-    if not channel_id:
-
-        return await interaction.followup.send(
-            "通報先が未設定です",
-            ephemeral=True
-        )
-
-    ch = interaction.guild.get_channel(channel_id)
-
-    if not ch:
-
-        return await interaction.followup.send(
-            "通報チャンネルが存在しません",
-            ephemeral=True
-        )
-
-    embed = discord.Embed(
-        title="📨 匿名通報",
-        color=0xff5555
-    )
-
-    embed.add_field(
-        name="整理番号",
-        value=report_id,
-        inline=False
-    )
-
-    embed.add_field(
-        name="内容",
-        value=f"**{title}**\n{detail}",
-        inline=False
-    )
-
-    embed.add_field(
-        name="日時",
-        value=str(datetime.now()),
-        inline=False
-    )
-
-    embed.add_field(
-        name="状態",
-        value="未対応",
-        inline=False
-    )
-
-    view = ReportView(
-        report_id,
-        interaction.user.id
-    )
-
-    await ch.send(
-        embed=embed,
-        view=view
-    )
-
-    log_ch = await get_log_channel(
-        interaction.guild.id
-    )
-
-    if log_ch:
-
-        await log_ch.send(
-            f"新規通報: {report_id}"
-        )
-
-    await interaction.followup.send(
-        f"通報完了\nID: {report_id}",
-        ephemeral=True
-    )
-
-
-# =========================
-# 返信モーダル
-# =========================
-class ReplyModal(discord.ui.Modal, title="通報返信"):
+class ReplyModal(discord.ui.Modal):
 
     def __init__(self, user_id, report_id):
-        super().__init__()
+
+        super().__init__(title="通報返信")
 
         self.user_id = user_id
         self.report_id = report_id
 
-    title_input = discord.ui.TextInput(
-        label="件名",
-        max_length=100
-    )
+        self.title_input = discord.ui.TextInput(
+            label="件名",
+            max_length=100
+        )
 
-    detail_input = discord.ui.TextInput(
-        label="内容",
-        style=discord.TextStyle.paragraph,
-        max_length=2000
-    )
+        self.detail_input = discord.ui.TextInput(
+            label="内容",
+            style=discord.TextStyle.paragraph,
+            max_length=2000
+        )
+
+        self.add_item(self.title_input)
+        self.add_item(self.detail_input)
 
     async def on_submit(self, interaction: discord.Interaction):
 
         try:
 
-            user = await bot.fetch_user(int(self.user_id))
+            user = await bot.fetch_user(
+                int(self.user_id)
+            )
 
             embed = discord.Embed(
                 title="📩 運営からの返信",
@@ -244,27 +173,27 @@ class ReplyModal(discord.ui.Modal, title="通報返信"):
                 ephemeral=True
             )
 
-        except:
+        except Exception as e:
 
             await interaction.response.send_message(
-                "DM送信失敗",
+                f"DM送信失敗\n{e}",
                 ephemeral=True
             )
 
 # =========================
-# ボタンView
+# 通報ボタン
 # =========================
+
 class ReportView(discord.ui.View):
 
-    def __init__(self, report_id, user_id):
-        super().__init__(timeout=None)
+    def __init__(self):
 
-        self.report_id = report_id
-        self.user_id = user_id
+        super().__init__(timeout=None)
 
     @discord.ui.button(
         label="返信",
-        style=discord.ButtonStyle.primary
+        style=discord.ButtonStyle.primary,
+        custom_id="report_reply"
     )
     async def reply_button(
         self,
@@ -272,16 +201,38 @@ class ReportView(discord.ui.View):
         button: discord.ui.Button
     ):
 
+        embed = interaction.message.embeds[0]
+
+        report_id = embed.fields[0].value
+
+        async with aiosqlite.connect("bot.db") as db:
+
+            cur = await db.execute("""
+            SELECT user_id
+            FROM reports
+            WHERE id=?
+            """, (report_id,))
+
+            row = await cur.fetchone()
+
+        if not row:
+
+            return await interaction.response.send_message(
+                "ユーザー取得失敗",
+                ephemeral=True
+            )
+
         modal = ReplyModal(
-            self.user_id,
-            self.report_id
+            row[0],
+            report_id
         )
 
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(
         label="調査中",
-        style=discord.ButtonStyle.secondary
+        style=discord.ButtonStyle.secondary,
+        custom_id="report_checking"
     )
     async def checking_button(
         self,
@@ -289,7 +240,7 @@ class ReportView(discord.ui.View):
         button: discord.ui.Button
     ):
 
-        embed = interaction.message.embeds[0]
+        embed = interaction.message.embeds[0].copy()
 
         embed.color = 0xffff00
 
@@ -300,16 +251,19 @@ class ReportView(discord.ui.View):
             inline=False
         )
 
-        await interaction.message.edit(embed=embed)
+        await interaction.message.edit(
+            embed=embed
+        )
 
         await interaction.response.send_message(
-            "調査中に変更",
+            "調査中へ変更",
             ephemeral=True
         )
 
     @discord.ui.button(
         label="対応済み",
-        style=discord.ButtonStyle.success
+        style=discord.ButtonStyle.success,
+        custom_id="report_done"
     )
     async def done_button(
         self,
@@ -317,7 +271,7 @@ class ReportView(discord.ui.View):
         button: discord.ui.Button
     ):
 
-        embed = interaction.message.embeds[0]
+        embed = interaction.message.embeds[0].copy()
 
         embed.color = 0x00ff00
 
@@ -328,16 +282,19 @@ class ReportView(discord.ui.View):
             inline=False
         )
 
-        await interaction.message.edit(embed=embed)
+        await interaction.message.edit(
+            embed=embed
+        )
 
         await interaction.response.send_message(
-            "対応済みに変更",
+            "対応済みへ変更",
             ephemeral=True
         )
 
     @discord.ui.button(
         label="却下",
-        style=discord.ButtonStyle.danger
+        style=discord.ButtonStyle.danger,
+        custom_id="report_reject"
     )
     async def reject_button(
         self,
@@ -345,7 +302,7 @@ class ReportView(discord.ui.View):
         button: discord.ui.Button
     ):
 
-        embed = interaction.message.embeds[0]
+        embed = interaction.message.embeds[0].copy()
 
         embed.color = 0xff0000
 
@@ -356,12 +313,135 @@ class ReportView(discord.ui.View):
             inline=False
         )
 
-        await interaction.message.edit(embed=embed)
+        await interaction.message.edit(
+            embed=embed
+        )
 
         await interaction.response.send_message(
-            "却下に変更",
+            "却下へ変更",
             ephemeral=True
         )
+
+# =========================
+# 通報
+# =========================
+
+@bot.tree.command(
+    name="report",
+    description="匿名通報"
+)
+async def report(
+    interaction: discord.Interaction,
+    title: str,
+    detail: str
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    async with aiosqlite.connect("bot.db") as db:
+
+        cur = await db.execute("""
+        INSERT INTO reports(
+            user_id,
+            guild_id,
+            title,
+            detail,
+            status,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(interaction.user.id),
+            str(interaction.guild.id),
+            title,
+            detail,
+            "未対応",
+            str(datetime.now())
+        ))
+
+        await db.commit()
+
+        report_id = cur.lastrowid
+
+        cur = await db.execute("""
+        SELECT channel_id
+        FROM report_settings
+        WHERE guild_id=?
+        """, (
+            str(interaction.guild.id),
+        ))
+
+        row = await cur.fetchone()
+
+    if not row:
+
+        return await interaction.followup.send(
+            "通報先未設定",
+            ephemeral=True
+        )
+
+    ch = interaction.guild.get_channel(
+        int(row[0])
+    )
+
+    if not ch:
+
+        return await interaction.followup.send(
+            "通報チャンネルが存在しません",
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="📨 匿名通報",
+        color=0xff5555
+    )
+
+    embed.add_field(
+        name="整理番号",
+        value=str(report_id),
+        inline=False
+    )
+
+    embed.add_field(
+        name="内容",
+        value=f"**{title}**\n{detail}",
+        inline=False
+    )
+
+    embed.add_field(
+        name="日時",
+        value=str(datetime.now()),
+        inline=False
+    )
+
+    embed.add_field(
+        name="状態",
+        value="未対応",
+        inline=False
+    )
+
+    await ch.send(
+        embed=embed,
+        view=ReportView()
+    )
+
+    log_ch = await get_log_channel(
+        interaction.guild.id
+    )
+
+    if log_ch:
+
+        await log_ch.send(
+            f"新規通報: {report_id}"
+        )
+
+    await interaction.followup.send(
+        f"通報完了\nID: {report_id}",
+        ephemeral=True
+    )
+
 
 
 # =======================
@@ -460,6 +540,9 @@ async def on_message(message):
 async def on_ready():
     await init_db()
     await bot.tree.sync()
+
+    bot.add_view(ReportView(0, 0))
+
     scheduler.start()
 
     print("READY OK:", bot.user)
